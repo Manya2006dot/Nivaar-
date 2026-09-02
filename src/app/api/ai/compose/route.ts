@@ -3,6 +3,7 @@ import { composeReport } from "@/lib/ai/provider";
 import { createServerSupabase } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 30; // seconds. Note: capped at 10s on Vercel's Hobby plan regardless of this setting; Pro plans honor it.
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,7 +19,7 @@ export async function POST(req: NextRequest) {
     const description = await composeReport({ issueType, severity, imageDescription, voiceTranscript, location });
     return NextResponse.json({ description });
   } catch (err: any) {
-    console.error("[compose] error:", err);
+    console.error("[compose] error:", { message: err?.message, stack: err?.stack });
     return NextResponse.json({ error: "Could not prepare the report text.", detail: err?.message }, { status: 502 });
   }
 }

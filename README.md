@@ -135,7 +135,44 @@ always a missing/misnamed environment variable.
 
 ---
 
-## Upgrading admin auth (before giving this to a real team)
+## Fixed: mobile AI analysis failure ("Request Entity Too Large")
+
+**Root cause:** phone camera photos (often 3–12MB+) were base64-encoded and
+sent as JSON directly to `/api/ai/classify`. Vercel Serverless Functions
+enforce a hard ~4.5MB request body limit at the platform level — this can't
+be raised via Next.js config. Oversized requests were rejected with a
+plain-text `413 Request Entity Too Large` response *before* the route
+handler ever ran, and the client's `response.json()` then threw trying to
+parse that plain text — the `"Unexpected token 'R', "Request En"..."` error.
+Desktop appeared to work only because typical test images happened to be
+smaller than the limit; it was never actually safe.
+
+**Fix, two layers:**
+1. `src/lib/imageCompress.ts` — every photo is resized (max 1600px long
+   edge) and re-encoded as JPEG client-side, immediately on selection,
+   before it's ever sent anywhere. This keeps the classify payload to
+   typically 200–700KB regardless of original camera resolution, comfortably
+   under the platform limit. Falls back to the original file if canvas
+   decoding fails for a given photo (extremely rare format edge case) rather
+   than blocking the user.
+2. `src/lib/safeFetch.ts` — every client→API call now checks the response's
+   `content-type` before calling `.json()`. If the server (or the platform)
+   ever returns non-JSON again for any reason, the user sees a clean error
+   message instead of a raw parse exception.
+
+Server routes (`classify`, `transcribe`, `compose`) also gained a
+size-guard rejection with proper JSON output, and structured
+`console.error`/`console.log` calls so failures are diagnosable from
+Vercel's Runtime Logs dashboard. One caveat: a request rejected at the
+*platform* level (the original bug) never reaches your function at all, so
+it won't appear in your function's logs — only in Vercel's edge/proxy-level
+logs. That's exactly why the client-side compression fix matters: it keeps
+you from ever hitting that platform wall in the first place.
+
+**No new environment variables are required for this fix** — it's entirely
+code-level (client compression + defensive parsing + server guards).
+
+
 
 Replace the passcode gate with real role assignment:
 1. In Supabase Table Editor → `profiles`, manually set `is_admin = true` for

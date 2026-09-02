@@ -1,22 +1,22 @@
 "use client";
-import { T } from "@/components/tokens";
+import { T, SOFT_SHADOW, tintShadow } from "@/components/tokens";
 import { ReactNode } from "react";
 
 export function PrimaryButton({
-  children, onClick, disabled, icon, full = true, type = "button",
-}: { children: ReactNode; onClick?: () => void; disabled?: boolean; icon?: ReactNode; full?: boolean; type?: "button" | "submit" }) {
+  children, onClick, disabled, icon, full = true, type = "button", variant = "purple",
+}: { children: ReactNode; onClick?: () => void; disabled?: boolean; icon?: ReactNode; full?: boolean; type?: "button" | "submit"; variant?: "purple" | "yellow" }) {
+  const isYellow = variant === "yellow";
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`${full ? "w-full" : ""} flex items-center justify-center gap-2 rounded-2xl py-4 font-extrabold text-[16px] active:scale-[0.95] active:translate-y-0.5 transition disabled:opacity-40`}
+      className={`${full ? "w-full" : ""} flex items-center justify-center gap-2 rounded-[20px] py-4 font-extrabold text-[16px] active:scale-[0.96] transition disabled:opacity-40`}
       style={{
-        background: disabled ? T.sage : `linear-gradient(135deg, ${T.green}, ${T.greenDeep})`,
-        color: "#fff",
+        background: disabled ? T.sage : isYellow ? T.yellow : T.purple,
+        color: isYellow ? T.ink : "#fff",
         fontFamily: "var(--font-jakarta)",
-        border: "3px solid #0D2E1E",
-        boxShadow: disabled ? "none" : "4px 4px 0px #0D2E1E",
+        boxShadow: disabled ? "none" : isYellow ? tintShadow(T.yellowDeep) : tintShadow(T.purpleDeep),
       }}
     >
       {children}
@@ -32,8 +32,8 @@ export function SecondaryButton({
     <button
       type="button"
       onClick={onClick}
-      className={`${full ? "w-full" : ""} rounded-2xl py-4 font-extrabold text-[16px] active:scale-[0.95] active:translate-y-0.5 transition`}
-      style={{ background: T.card, color: T.ink, border: `3px solid ${T.ink}`, fontFamily: "var(--font-jakarta)", boxShadow: `4px 4px 0px ${T.ink}` }}
+      className={`${full ? "w-full" : ""} rounded-[20px] py-4 font-extrabold text-[16px] active:scale-[0.96] transition`}
+      style={{ background: T.card, color: T.purpleDeep, border: `2px solid ${T.purpleTint}`, fontFamily: "var(--font-jakarta)", boxShadow: SOFT_SHADOW }}
     >
       {children}
     </button>

@@ -1,9 +1,15 @@
 "use client";
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { Lang, t as translate } from "./translations";
+import { Lang, t as translate, tIssueType as translateIssue, tStatus as translateStatus } from "./translations";
 import { createClient, ensureAuthenticated } from "@/lib/supabase/client";
 
-interface Ctx { lang: Lang; setLang: (l: Lang) => void; t: (key: Parameters<typeof translate>[0]) => string; ready: boolean; }
+interface Ctx {
+  lang: Lang; setLang: (l: Lang) => void;
+  t: (key: Parameters<typeof translate>[0]) => string;
+  tIssue: (issueType: string) => string;
+  tStatus: (status: string) => string;
+  ready: boolean;
+}
 const LanguageContext = createContext<Ctx | null>(null);
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
@@ -32,7 +38,13 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <LanguageContext.Provider value={{ lang, setLang, t: (key) => translate(key, lang), ready }}>
+    <LanguageContext.Provider value={{
+      lang, setLang,
+      t: (key) => translate(key, lang),
+      tIssue: (issueType) => translateIssue(issueType, lang),
+      tStatus: (status) => translateStatus(status, lang),
+      ready,
+    }}>
       {children}
     </LanguageContext.Provider>
   );

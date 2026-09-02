@@ -1,21 +1,25 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Camera, Image as ImageIcon, Check, RotateCcw, Mic, MapPin, ChevronRight,
-  Sparkles, Keyboard, AlertTriangle, RefreshCw, Loader2, Users, Send, Edit3, Volume2, Video,
+  Camera, Image as ImageIcon, Check, X, Plus, Mic, ChevronRight,
+  Sparkles, Keyboard, AlertTriangle, RefreshCw, Loader2, Users, Send,
+  Edit3, Flame, Bot, Play, Pause, Trash2, Megaphone,
 } from "lucide-react";
-import { T, categoryColor, chipBg } from "@/components/tokens";
+import { T, categoryColor, chipBg, tintShadow } from "@/components/tokens";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
-import { Pill, AIChip } from "@/components/ui/Pill";
+import { Pill } from "@/components/ui/Pill";
 import { TopBar } from "@/components/ui/TopBar";
-import { MapView } from "@/components/MapView";
+import { Stepper } from "@/components/ui/Stepper";
 import { ISSUE_TYPES, ISSUE_EMOJI, resolveAuthority } from "@/lib/routing";
 import { createClient, ensureAuthenticated, uploadEvidence } from "@/lib/supabase/client";
+import { useLanguage } from "@/lib/i18n/LanguageProvider";
+import { compressImage } from "@/lib/imageCompress";
+import { postJson, postForm, parseJsonResponse } from "@/lib/safeFetch";
 
 type Step =
-  | "camera" | "analyzing" | "analysis-failed" | "manual-describe"
-  | "confidence" | "severity" | "voice" | "location" | "duplicate"
+  | "capture" | "ai-detecting" | "ai-failed" | "manual-describe"
+  | "severity" | "locating" | "duplicate"
   | "review" | "submitting" | "submitted";
 
 interface Classification {
@@ -23,21 +27,11 @@ interface Classification {
   severity: "Low" | "Medium" | "High"; explanation: string; description: string;
 }
 interface LocationData { lat: number; lng: number; area: string; cityLine: string; }
+interface Photo { file: File; dataUrl: string; }
 
 const LOW_CONFIDENCE_THRESHOLD = 65;
 const DEFAULT_LOC = { lat: 12.9945, lng: 77.691 };
-
-async function fileToBase64(file: File): Promise<{ base64: string; dataUrl: string }> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      resolve({ base64: result.split(",")[1], dataUrl: result });
-    };
-    reader.onerror = () => reject(new Error("Could not read file"));
-    reader.readAsDataURL(file);
-  });
-}
+const MAX_PHOTOS = 5;
 
 async function reverseGeocode(lat: number, lng: number): Promise<{ area: string; cityLine: string }> {
   const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=16`);
@@ -52,75 +46,61 @@ async function reverseGeocode(lat: number, lng: number): Promise<{ area: string;
 
 export default function ReportFlow() {
   const router = useRouter();
-  const [step, setStep] = useState<Step>("camera");
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [photoDataUrl, setPhotoDataUrl] = useState<string | null>(null);
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [classification, setClassification] = useState<Classification | null>(null);
-  const [severityChosen, setSeverityChosen] = useState<"Low" | "Medium" | "High">("Medium");
+  const { t, tIssue } = useLanguage();
+  const [step, setStep] = useState<Step>("capture");
+
+  // --- capture: photos ---
+  const [photos, setPhotos] = useState<Photo[]>([]);
+
+  // --- capture: voice ---
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const [voiceBlob, setVoiceBlob] = useState<Blob | null>(null);
+  const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [voiceDurationSec, setVoiceDurationSec] = useState(0);
+
+  // --- AI + review ---
+  const [classification, setClassification] = useState<Classification | null>(null);
+  const [severityChosen, setSeverityChosen] = useState<"Low" | "Medium" | "High">("Medium");
   const [location, setLocation] = useState<LocationData | null>(null);
-  const [locationStatus, setLocationStatus] = useState<"locating" | "ok" | "denied">("locating");
   const [duplicates, setDuplicates] = useState<any[]>([]);
   const [finalDescription, setFinalDescription] = useState("");
+  const [editingDescription, setEditingDescription] = useState(false);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [manualText, setManualText] = useState("");
+  const [aiDone, setAiDone] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const [recording, setRecording] = useState(false);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
 
-  // ---------------- Step: camera ----------------
-  const handlePhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setPhotoFile(file);
-    const { dataUrl } = await fileToBase64(file);
-    setPhotoDataUrl(dataUrl);
-    e.target.value = "";
-  };
-  const handleVideo = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) setVideoFile(file);
-    e.target.value = "";
-  };
+  useEffect(() => {
+    return () => { if (voiceUrl) URL.revokeObjectURL(voiceUrl); };
+  }, [voiceUrl]);
 
-  const runAnalysis = async () => {
-    if (!photoFile) return;
-    setStep("analyzing");
-    setError(null);
-    try {
-      await ensureAuthenticated();
-      const { base64 } = await fileToBase64(photoFile);
-      const res = await fetch("/api/ai/classify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: base64, mediaType: photoFile.type || "image/jpeg" }),
-      });
-      if (!res.ok) throw new Error((await res.json()).error || "Analysis failed");
-      const result: Classification = await res.json();
-      setClassification(result);
-      setSeverityChosen(result.severity);
-      setStep("confidence");
-    } catch (err: any) {
-      setError(err.message);
-      setStep("analysis-failed");
+  // ---------------- Capture: photos ----------------
+  // Every selected photo is compressed/resized client-side immediately —
+  // this is the actual fix for the mobile "Request Entity Too Large" bug.
+  // See src/lib/imageCompress.ts for why.
+  const addPhotos = async (fileList: FileList | null) => {
+    if (!fileList) return;
+    const remaining = MAX_PHOTOS - photos.length;
+    const files = Array.from(fileList).slice(0, remaining);
+    const added: Photo[] = [];
+    for (const file of files) {
+      const compressed = await compressImage(file);
+      added.push(compressed);
     }
+    setPhotos((p) => [...p, ...added]);
   };
+  const removePhoto = (idx: number) => setPhotos((p) => p.filter((_, i) => i !== idx));
 
-  const handleManualDescribe = (text: string) => {
-    setClassification({
-      isCivicIssue: true, issueType: "Other", confidence: 0, severity: "Medium",
-      explanation: "Reported directly by the citizen.", description: text,
-    });
-    setSeverityChosen("Medium");
-    setStep("severity");
-  };
-
-  // ---------------- Step: voice ----------------
+  // ---------------- Capture: voice ----------------
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -130,73 +110,124 @@ export default function ReportFlow() {
       recorder.onstop = async () => {
         const blob = new Blob(chunks, { type: "audio/webm" });
         setVoiceBlob(blob);
+        setVoiceUrl(URL.createObjectURL(blob));
         stream.getTracks().forEach((t) => t.stop());
+        setTranscribing(true);
         try {
           const form = new FormData();
           form.append("audio", blob, "voice-note.webm");
-          const res = await fetch("/api/ai/transcribe", { method: "POST", body: form });
-          if (res.ok) {
-            const data = await res.json();
-            setVoiceTranscript(data.transcript || "");
-          }
+          const data = await postForm("/api/ai/transcribe", form);
+          setVoiceTranscript(data.transcript || "");
         } catch {
-          // Non-fatal — user can still continue without a transcript.
+          // Non-fatal.
+        } finally {
+          setTranscribing(false);
         }
       };
       recorder.start();
       mediaRecorderRef.current = recorder;
       setRecording(true);
+      setVoiceDurationSec(0);
+      recordTimerRef.current = setInterval(() => setVoiceDurationSec((s) => s + 1), 1000);
     } catch {
-      setError("Microphone permission was not granted.");
+      setError(t("error_mic_denied"));
     }
   };
   const stopRecording = () => {
     mediaRecorderRef.current?.stop();
     setRecording(false);
+    if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+  };
+  const togglePlay = () => {
+    if (!audioPlayerRef.current) return;
+    if (playing) { audioPlayerRef.current.pause(); setPlaying(false); }
+    else { audioPlayerRef.current.play(); setPlaying(true); }
+  };
+  const deleteVoice = () => {
+    if (voiceUrl) URL.revokeObjectURL(voiceUrl);
+    setVoiceBlob(null); setVoiceUrl(null); setVoiceTranscript(""); setVoiceDurationSec(0); setPlaying(false);
   };
 
-  // ---------------- Step: location ----------------
-  const findLocation = () => {
-    setStep("location");
-    setLocationStatus("locating");
-    if (!("geolocation" in navigator)) { setLocationStatus("denied"); setLocation({ ...DEFAULT_LOC, area: "Mahadevapura", cityLine: "Bengaluru, Karnataka" }); return; }
+  // ---------------- Capture -> AI detection ----------------
+  const runCapture = async () => {
+    if (photos.length === 0) return;
+    setStep("ai-detecting");
+    setAiDone(false);
+    setError(null);
+    try {
+      await ensureAuthenticated();
+      const primary = photos[0];
+      // photos[0].dataUrl is already the compressed version from addPhotos —
+      // reuse it directly instead of re-reading the file.
+      const base64 = primary.dataUrl.split(",")[1];
+      const result: Classification = await postJson("/api/ai/classify", {
+        imageBase64: base64,
+        mediaType: primary.file.type || "image/jpeg",
+      });
+      setClassification(result);
+      setSeverityChosen(result.severity);
+      setAiDone(true);
+    } catch (err: any) {
+      setError(err.message);
+      setStep("ai-failed");
+    }
+  };
+
+  const handleManualDescribe = (text: string) => {
+    setClassification({
+      isCivicIssue: true, issueType: "Other", confidence: 0, severity: "Medium",
+      explanation: "Reported directly by the citizen.", description: text,
+    });
+    setSeverityChosen("Medium");
+    setAiDone(true);
+    setStep("ai-detecting");
+  };
+
+  // ---------------- AI detection -> severity -> location -> duplicate -> review ----------------
+  const proceedToLocation = () => {
+    setStep("locating");
+    if (!("geolocation" in navigator)) {
+      setLocation({ ...DEFAULT_LOC, area: "Mahadevapura", cityLine: "Bengaluru, Karnataka" });
+      checkDuplicates({ ...DEFAULT_LOC, area: "Mahadevapura", cityLine: "Bengaluru, Karnataka" });
+      return;
+    }
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const lat = pos.coords.latitude, lng = pos.coords.longitude;
-        try {
-          const place = await reverseGeocode(lat, lng);
-          setLocation({ lat, lng, ...place });
-        } catch {
-          setLocation({ lat, lng, area: "Your location", cityLine: "" });
-        }
-        setLocationStatus("ok");
+        let place = { area: "Your location", cityLine: "" };
+        try { place = await reverseGeocode(lat, lng); } catch {}
+        const loc = { lat, lng, ...place };
+        setLocation(loc);
+        checkDuplicates(loc);
       },
-      () => { setLocationStatus("denied"); setLocation({ ...DEFAULT_LOC, area: "Mahadevapura", cityLine: "Bengaluru, Karnataka" }); },
+      () => {
+        const loc = { ...DEFAULT_LOC, area: "Mahadevapura", cityLine: "Bengaluru, Karnataka" };
+        setLocation(loc);
+        checkDuplicates(loc);
+      },
       { timeout: 8000, maximumAge: 60000 }
     );
   };
 
-  // ---------------- Step: duplicate ----------------
-  const checkDuplicates = async () => {
-    setStep("duplicate");
-    if (!classification || !location) return;
+  const checkDuplicates = async (loc: LocationData) => {
+    if (!classification) return;
     try {
-      const res = await fetch("/api/reports/duplicates", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ issueType: classification.issueType, latitude: location.lat, longitude: location.lng }),
-      });
-      const data = await res.json();
-      setDuplicates(data.matches || []);
-      if (!data.matches?.length) setTimeout(() => goToReview(), 300);
+      const data = await postJson("/api/reports/duplicates", { issueType: classification.issueType, latitude: loc.lat, longitude: loc.lng });
+      if (data.matches?.length) {
+        setDuplicates(data.matches);
+        setStep("duplicate");
+      } else {
+        goToReview(loc);
+      }
     } catch {
-      setTimeout(() => goToReview(), 300);
+      goToReview(loc);
     }
   };
 
   const joinDuplicate = async (reportId: string) => {
     try {
       const supabase = createClient();
-      const { data, error } = await supabase.rpc("join_report", { p_report_id: reportId });
+      const { error } = await supabase.rpc("join_report", { p_report_id: reportId });
       if (error) throw error;
       setSubmittedId(reportId);
       setStep("submitted");
@@ -205,121 +236,230 @@ export default function ReportFlow() {
     }
   };
 
-  // ---------------- Step: review / submit ----------------
-  const goToReview = async () => {
+  const goToReview = async (loc: LocationData) => {
     setStep("review");
-    if (!classification || !location) return;
+    if (!classification) return;
     try {
-      const res = await fetch("/api/ai/compose", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          issueType: classification.issueType, severity: severityChosen,
-          imageDescription: classification.description, voiceTranscript: voiceTranscript || undefined,
-          location: `${location.area}, ${location.cityLine}`,
-        }),
+      const data = await postJson("/api/ai/compose", {
+        issueType: classification.issueType, severity: severityChosen,
+        imageDescription: classification.description, voiceTranscript: voiceTranscript || undefined,
+        location: `${loc.area}, ${loc.cityLine}`,
       });
-      if (res.ok) {
-        const data = await res.json();
-        setFinalDescription(data.description);
-      } else {
-        setFinalDescription(classification.description.replace("{location}", `${location.area}, ${location.cityLine}`));
-      }
+      setFinalDescription(data.description);
     } catch {
-      setFinalDescription(classification.description.replace("{location}", `${location.area}, ${location.cityLine}`));
+      setFinalDescription(classification.description.replace("{location}", `${loc.area}, ${loc.cityLine}`));
     }
   };
 
+  // ---------------- Submit ----------------
   const submitReport = async () => {
     if (!classification || !location) return;
     setStep("submitting");
     setError(null);
     try {
       const userId = await ensureAuthenticated();
-      let imageUrl: string | null = null;
-      let videoUrl: string | null = null;
-      let voiceUrl: string | null = null;
+      // All selected photos are genuinely uploaded to Storage. Today's
+      // `reports` table has a single image_url column (unchanged schema),
+      // so the first photo becomes the report's primary evidence photo —
+      // identical to the existing, working submission contract.
+      const uploadedUrls: string[] = [];
+      for (let i = 0; i < photos.length; i++) {
+        setUploadProgress({ current: i + 1, total: photos.length });
+        const url = await uploadEvidence(photos[i].file, userId, "image", (photos[i].file.name.split(".").pop() || "jpg"));
+        uploadedUrls.push(url);
+      }
+      setUploadProgress(null);
+      let uploadedVoiceUrl: string | null = null;
+      if (voiceBlob) uploadedVoiceUrl = await uploadEvidence(voiceBlob, userId, "voice", "webm");
 
-      if (photoFile) imageUrl = await uploadEvidence(photoFile, userId, "image", (photoFile.name.split(".").pop() || "jpg"));
-      if (videoFile) videoUrl = await uploadEvidence(videoFile, userId, "video", (videoFile.name.split(".").pop() || "mp4"));
-      if (voiceBlob) voiceUrl = await uploadEvidence(voiceBlob, userId, "voice", "webm");
-
-      const res = await fetch("/api/reports", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageUrl, videoUrl, voiceUrl, voiceTranscript: voiceTranscript || null,
-          issueType: classification.issueType, aiConfidence: classification.confidence || null,
-          severity: severityChosen, aiExplanation: classification.explanation,
-          description: finalDescription || classification.description,
-          latitude: location.lat, longitude: location.lng,
-          address: `${location.area}, ${location.cityLine}`, landmark: location.area,
-          isDemo: false,
-        }),
+      const data = await postJson("/api/reports", {
+        imageUrl: uploadedUrls[0] ?? null, videoUrl: null, voiceUrl: uploadedVoiceUrl, voiceTranscript: voiceTranscript || null,
+        issueType: classification.issueType, aiConfidence: classification.confidence || null,
+        severity: severityChosen, aiExplanation: classification.explanation,
+        description: finalDescription || classification.description,
+        latitude: location.lat, longitude: location.lng,
+        address: `${location.area}, ${location.cityLine}`, landmark: location.area,
+        isDemo: false,
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Submission failed");
-      const data = await res.json();
       setSubmittedId(data.report.id);
       setStep("submitted");
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || t("error_generic"));
       setStep("review");
     }
   };
 
   const issue = classification;
   const emoji = issue ? ISSUE_EMOJI[issue.issueType] || "❗" : "❗";
+  const severityColor = (s: string) => (s === "High" ? T.rust : s === "Medium" ? T.amber : T.green);
 
   // ============================= RENDER =============================
-  if (step === "camera") {
+
+  if (step === "capture") {
     return (
-      <div className="flex flex-col min-h-full pb-8" style={{ background: T.ink }}>
-        <div className="px-6 pt-5"><TopBar onBack={() => router.push("/home")} /></div>
-        <div className="px-6">
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 22, color: "#fff" }}>Show us the problem</div>
-          <div className="text-[13.5px] mt-1" style={{ color: "#C9D4CD" }}>Take a clear photo of what needs attention.</div>
+      <div className="flex flex-col min-h-full pb-8">
+        <TopBar onBack={() => router.push("/home")} title="" />
+        <div className="px-6 -mt-2">
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 800, fontSize: 20, color: T.ink, textAlign: "center" }}>{t("capture_title")}</div>
         </div>
-        <div className="mx-6 mt-6 rounded-[32px] flex-1 flex items-center justify-center relative overflow-hidden" style={{ background: "#1B2B22", minHeight: 300, border: "1px solid rgba(255,255,255,0.08)" }}>
-          {photoDataUrl ? <img src={photoDataUrl} alt="" className="w-full h-full object-cover absolute inset-0" /> : <Camera size={44} color="rgba(255,255,255,0.35)" strokeWidth={1.4} />}
-        </div>
-        <div className="px-6 mt-6 space-y-3">
-          {!photoDataUrl ? (
-            <div className="flex items-center justify-center gap-6">
-              <button onClick={() => fileRef.current?.click()} className="w-11 h-11 rounded-full flex items-center justify-center" style={{ background: "rgba(255,255,255,0.1)" }}><ImageIcon size={19} color="#fff" /></button>
-              <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handlePhoto} />
-              <button onClick={() => fileRef.current?.click()} className="w-[72px] h-[72px] rounded-full flex items-center justify-center active:scale-95 transition" style={{ background: "#fff", border: `5px solid ${T.green}` }}><span className="w-[52px] h-[52px] rounded-full" style={{ background: T.green }} /></button>
-              <button onClick={() => videoRef.current?.click()} className="w-11 h-11 rounded-full flex items-center justify-center" style={{ background: "rgba(255,255,255,0.1)" }}><Video size={18} color="#fff" /></button>
-              <input ref={videoRef} type="file" accept="video/*" capture="environment" className="hidden" onChange={handleVideo} />
-            </div>
+        <Stepper active={1} />
+
+        <div className="px-6 mt-2">
+          {photos.length === 0 ? (
+            <button onClick={() => fileRef.current?.click()} className="w-full rounded-[24px] flex flex-col items-center justify-center py-10" style={{ background: T.purpleTint, border: `2px dashed ${T.purple}55` }}>
+              <div className="w-16 h-16 rounded-[20px] flex items-center justify-center mb-3" style={{ background: T.purple, boxShadow: tintShadow(T.purpleDeep) }}>
+                <Camera size={28} color="#fff" />
+              </div>
+              <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 16, color: T.ink }}>{t("capture_take_photo")}</div>
+              <div style={{ fontSize: 12.5, color: T.inkSoft }}>{t("capture_capture_clearly")}</div>
+            </button>
           ) : (
-            <div className="flex gap-3">
-              <SecondaryButton onClick={() => { setPhotoFile(null); setPhotoDataUrl(null); }}><span className="flex items-center justify-center gap-2"><RotateCcw size={16} /> Retake</span></SecondaryButton>
-              <PrimaryButton onClick={runAnalysis} icon={<Check size={17} />}>Use photo</PrimaryButton>
-            </div>
+            <img src={photos[0].dataUrl} alt="" className="w-full rounded-[24px] object-cover" style={{ height: 190 }} />
           )}
-          {videoFile && <div className="text-center text-[12px]" style={{ color: "#8FA398" }}>+ 1 video attached ({videoFile.name})</div>}
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
+
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <button onClick={() => fileRef.current?.click()} className="flex items-center justify-center gap-2 rounded-[16px] py-3 font-bold text-[13.5px]" style={{ background: T.purpleTint, color: T.purpleDeep }}><Camera size={16} /> {t("capture_camera")}</button>
+            <button onClick={() => fileRef.current?.click()} className="flex items-center justify-center gap-2 rounded-[16px] py-3 font-bold text-[13.5px]" style={{ background: T.blueTint, color: T.blueDeep }}><ImageIcon size={16} /> {t("capture_gallery")}</button>
+          </div>
+
+          <div className="flex items-center justify-between mt-5 mb-2">
+            <span style={{ fontSize: 13, fontWeight: 700, color: T.ink }}>{t("capture_add_more")}</span>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: T.purpleDeep }}>{photos.length}/{MAX_PHOTOS}</span>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {photos.map((p, i) => (
+              <div key={i} className="relative w-14 h-14">
+                <img src={p.dataUrl} alt="" className="w-14 h-14 rounded-[14px] object-cover" />
+                <button onClick={() => removePhoto(i)} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: T.ink }}><X size={11} color="#fff" /></button>
+              </div>
+            ))}
+            {photos.length < MAX_PHOTOS && (
+              <button onClick={() => fileRef.current?.click()} className="w-14 h-14 rounded-[14px] flex items-center justify-center" style={{ background: T.purpleTint, border: `2px dashed ${T.purple}66` }}>
+                <Plus size={18} color={T.purpleDeep} />
+              </button>
+            )}
+          </div>
+
+          <div className="mt-6">
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 6 }}>{t("capture_tell_us_more")}</div>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: T.purpleDeep }}>{t("capture_speak_in_language")}</div>
+
+            {voiceUrl && <audio ref={audioPlayerRef} src={voiceUrl} onEnded={() => setPlaying(false)} className="hidden" />}
+
+            <div className="flex items-center gap-3 mt-3 rounded-[18px] p-3" style={{ background: T.card, boxShadow: "0 4px 14px -8px rgba(139,127,209,0.3)" }}>
+              {!voiceUrl ? (
+                <button onClick={recording ? stopRecording : startRecording} className="w-11 h-11 rounded-full flex items-center justify-center shrink-0 relative" style={{ background: recording ? T.rust : T.purple }}>
+                  {recording && <span className="absolute inset-0 rounded-full animate-ping" style={{ background: T.rust, opacity: 0.35 }} />}
+                  <Mic size={18} color="#fff" />
+                </button>
+              ) : (
+                <button onClick={togglePlay} className="w-11 h-11 rounded-full flex items-center justify-center shrink-0" style={{ background: T.green }}>
+                  {playing ? <Pause size={18} color="#fff" /> : <Play size={18} color="#fff" />}
+                </button>
+              )}
+              <div className="flex-1 flex items-center gap-[3px] h-8">
+                {recording ? (
+                  Array.from({ length: 20 }).map((_, i) => (
+                    <span key={i} className="rounded-full" style={{ width: 3, height: `${8 + ((i * 37) % 22)}px`, background: [T.purple, T.rust, T.amber, T.blue, T.green][i % 5], animation: "nivaar-wave 0.9s ease-in-out infinite", animationDelay: `${i * 0.05}s` }} />
+                  ))
+                ) : voiceTranscript || transcribing ? (
+                  <span style={{ fontSize: 12, color: T.inkSoft }}>{transcribing ? t("capture_transcribing") : `"${voiceTranscript}"`}</span>
+                ) : voiceUrl ? (
+                  <span style={{ fontSize: 12, color: T.sage }}>{t("voice_play")}</span>
+                ) : (
+                  <span style={{ fontSize: 12, color: T.sage }}>{t("capture_tap_mic")}</span>
+                )}
+              </div>
+              <span style={{ fontSize: 11, color: T.inkSoft, fontFamily: "var(--font-mono)" }}>{String(Math.floor(voiceDurationSec / 60)).padStart(2, "0")}:{String(voiceDurationSec % 60).padStart(2, "0")}</span>
+              {voiceUrl && !recording && (
+                <button onClick={deleteVoice} className="w-8 h-8 rounded-full flex items-center justify-center shrink-0" style={{ background: T.rustTint }}><Trash2 size={14} color={T.rustDeep} /></button>
+              )}
+            </div>
+            <style>{`@keyframes nivaar-wave { 0%,100% { transform: scaleY(0.4); } 50% { transform: scaleY(1); } }`}</style>
+          </div>
+
+          <div className="mt-4 rounded-[18px] p-3 flex items-start gap-2.5" style={{ background: T.amberTint }}>
+            <Megaphone size={16} color={T.amberDeep} className="shrink-0 mt-0.5" />
+            <span style={{ fontSize: 12, color: T.inkSoft }}>{t("capture_tip")}</span>
+          </div>
+
+          {error && <div className="mt-3 text-[12.5px]" style={{ color: T.rust }}>{error}</div>}
+
+          <div className="mt-6">
+            <PrimaryButton onClick={runCapture} disabled={photos.length === 0} icon={<ChevronRight size={18} />}>{t("capture_continue")}</PrimaryButton>
+          </div>
         </div>
       </div>
     );
   }
 
-  if (step === "analyzing") {
+  if (step === "ai-detecting") {
     return (
-      <div className="flex flex-col min-h-full px-6 pt-8 pb-10 items-center">
-        {photoDataUrl && <img src={photoDataUrl} className="w-full rounded-[32px] object-cover" style={{ height: 260 }} alt="" />}
-        <div className="mt-8 text-center" style={{ fontFamily: "var(--font-baloo)", fontWeight: 500, fontSize: 20, color: T.ink }}>Analyzing your image…</div>
-        <Loader2 className="animate-spin mt-6" size={28} color={T.green} />
+      <div className="flex flex-col min-h-full pb-8">
+        <TopBar onBack={() => router.push("/home")} title="AI Detection" />
+        <div className="px-6">
+          <div className="rounded-[24px] p-4 flex items-center gap-3 mb-4" style={{ background: `linear-gradient(135deg, ${T.purple}, ${T.purpleDeep})` }}>
+            <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "rgba(255,255,255,0.25)" }}><Bot size={18} color="#fff" /></div>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 800, color: "#fff" }}>{aiDone ? t("ai_finished") : t("ai_analyzing")}</div>
+              <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.85)" }}>{aiDone ? t("ai_here_is_what_found") : t("ai_please_wait")}</div>
+            </div>
+          </div>
+
+          {photos[0] && <img src={photos[0].dataUrl} alt="" className="w-full rounded-[24px] object-cover mb-4" style={{ height: 220 }} />}
+
+          {!aiDone ? (
+            <div className="flex flex-col items-center py-6"><Loader2 className="animate-spin" size={26} color={T.purple} /></div>
+          ) : issue ? (
+            <>
+              <div className="rounded-[24px] p-4" style={{ background: T.card, boxShadow: "0 6px 18px -10px rgba(139,127,209,0.35)" }}>
+                <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 800, fontSize: 18, color: categoryColor(issue.issueType) }}>{tIssue(issue.issueType)} {t("ai_detected_suffix")}</div>
+                <div className="flex items-center justify-between mt-3">
+                  <span style={{ fontSize: 12.5, color: T.inkSoft, fontWeight: 700 }}>{t("ai_confidence")}</span>
+                  <Pill tone="purple">{issue.confidence}%</Pill>
+                </div>
+                <div className="w-full h-2 rounded-full mt-1.5" style={{ background: T.line }}>
+                  <div className="h-2 rounded-full" style={{ width: `${issue.confidence}%`, background: T.purple }} />
+                </div>
+              </div>
+
+              <div className="flex items-end gap-2 mt-4">
+                <div className="text-3xl">🤖</div>
+                <div className="rounded-[16px] rounded-bl-none px-3.5 py-2.5" style={{ background: T.purpleTint }}>
+                  <span style={{ fontSize: 12.5, color: T.ink }}>{issue.confidence < LOW_CONFIDENCE_THRESHOLD ? t("ai_not_sure") : `${t("ai_looks_like_prefix")} ${tIssue(issue.issueType).toLowerCase()}. ${t("ai_here_is_what_i_found")}`}</span>
+                </div>
+              </div>
+
+              {issue.confidence < LOW_CONFIDENCE_THRESHOLD ? (
+                <div className="mt-5 space-y-2">
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: T.ink }}>{t("ai_pick_category")}</div>
+                  <div className="flex flex-wrap gap-2">
+                    {ISSUE_TYPES.map((tp) => (
+                      <button key={tp} onClick={() => setClassification({ ...issue, issueType: tp, confidence: 60 })} className="px-3 py-1.5 rounded-full text-[12px] font-bold" style={{ background: issue.issueType === tp ? T.purple : T.purpleTint, color: issue.issueType === tp ? "#fff" : T.purpleDeep }}>{tIssue(tp)}</button>
+                    ))}
+                  </div>
+                  <div className="mt-4"><PrimaryButton onClick={() => setStep("severity")} icon={<ChevronRight size={18} />}>{t("ai_continue")}</PrimaryButton></div>
+                </div>
+              ) : (
+                <div className="mt-5"><PrimaryButton onClick={() => setStep("severity")} icon={<ChevronRight size={18} />}>{t("ai_continue_looks_right")}</PrimaryButton></div>
+              )}
+            </>
+          ) : null}
+        </div>
       </div>
     );
   }
 
-  if (step === "analysis-failed") {
+  if (step === "ai-failed") {
     return (
       <div className="flex flex-col min-h-full px-6 pt-12 pb-8 items-center justify-between">
         <div className="text-center">
-          <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5" style={{ background: T.rustTint }}><AlertTriangle size={26} color={T.rust} /></div>
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 20, color: T.ink }}>AI analysis is temporarily unavailable</div>
-          <div className="mt-2 text-[13.5px] max-w-[280px] mx-auto" style={{ color: T.inkSoft }}>{error || "We couldn't reach the image analysis service."} Your photo hasn't been lost.</div>
+          <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5" style={{ background: T.rustTint }}><AlertTriangle size={26} color={T.rustDeep} /></div>
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 20, color: T.ink }}>{t("error_ai_unavailable")}</div>
+          <div className="mt-2 text-[13.5px] max-w-[280px] mx-auto" style={{ color: T.inkSoft }}>{error || t("error_generic")}</div>
         </div>
-        <div className="w-full space-y-3"><PrimaryButton onClick={runAnalysis} icon={<RefreshCw size={17} />}>Retry</PrimaryButton><SecondaryButton onClick={() => setStep("manual-describe")}>Describe manually</SecondaryButton></div>
+        <div className="w-full space-y-3"><PrimaryButton onClick={runCapture} icon={<RefreshCw size={17} />}>{t("retry")}</PrimaryButton><SecondaryButton onClick={() => setStep("manual-describe")}>{t("describe_manually")}</SecondaryButton></div>
       </div>
     );
   }
@@ -328,150 +468,72 @@ export default function ReportFlow() {
     return (
       <div className="flex flex-col min-h-full px-6 pt-5 pb-8 justify-between">
         <div>
-          <TopBar onBack={() => setStep("camera")} />
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 21, color: T.ink }}>Tell us what happened</div>
-          <textarea value={manualText} onChange={(e) => setManualText(e.target.value)} rows={6} placeholder="e.g. There's a deep pothole outside my building..." className="w-full mt-5 rounded-[24px] p-4 text-[14px] outline-none" style={{ background: T.card, border: `1.5px solid ${T.line}`, color: T.ink }} />
+          <TopBar onBack={() => setStep("capture")} />
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 20, color: T.ink }}>Tell us what happened</div>
+          <textarea value={manualText} onChange={(e) => setManualText(e.target.value)} rows={6} placeholder="e.g. There's a deep pothole outside my building..." className="w-full mt-5 rounded-[20px] p-4 text-[14px] outline-none" style={{ background: T.card, border: `1.5px solid ${T.line}`, color: T.ink }} />
         </div>
-        <PrimaryButton disabled={manualText.trim().length < 5} onClick={() => handleManualDescribe(manualText.trim())} icon={<ChevronRight size={18} />}>Continue</PrimaryButton>
-      </div>
-    );
-  }
-
-  if (step === "confidence" && issue) {
-    const low = issue.confidence < LOW_CONFIDENCE_THRESHOLD;
-    if (low) {
-      return (
-        <div className="flex flex-col min-h-full px-6 pt-10 pb-8 items-center justify-between">
-          <div className="w-full text-center">
-            {photoDataUrl && <img src={photoDataUrl} className="w-full rounded-[24px] object-cover mb-4" style={{ height: 190 }} alt="" />}
-            <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 19, color: T.ink }}>I&apos;m not completely sure what I&apos;m seeing.</div>
-            <div className="mt-2 text-[13px]" style={{ color: T.inkSoft }}>My best guess is <b style={{ color: T.ink }}>{issue.issueType}</b>, but I&apos;d rather ask than assume.</div>
-          </div>
-          <div className="w-full space-y-3">
-            <button onClick={() => setStep("voice")} className="w-full flex items-center justify-center gap-2 rounded-2xl py-4 font-extrabold" style={{ background: T.green, color: "#fff" }}><Mic size={17} /> Speak</button>
-            <button onClick={() => setStep("manual-describe")} className="w-full flex items-center justify-center gap-2 rounded-2xl py-4 font-extrabold" style={{ background: "transparent", color: T.ink, border: `1.5px solid ${T.line}` }}><Keyboard size={17} /> Type</button>
-            <button onClick={() => setStep("camera")} className="w-full flex items-center justify-center gap-2 rounded-2xl py-3 font-extrabold text-[14px]" style={{ background: "transparent", color: T.inkSoft }}><RotateCcw size={15} /> Retake photo</button>
-          </div>
-        </div>
-      );
-    }
-    return (
-      <div className="flex flex-col min-h-full px-6 pt-10 pb-8 items-center justify-between">
-        <div className="w-full text-center">
-          <div style={{ fontSize: 13.5, color: T.inkSoft }}>I think I found...</div>
-          {photoDataUrl && <img src={photoDataUrl} className="w-full rounded-[24px] object-cover mt-4 mb-1" style={{ height: 170 }} alt="" />}
-          <div className="mt-3" style={{ fontFamily: "var(--font-baloo)", fontWeight: 800, fontSize: 28, color: categoryColor(issue.issueType) }}>{issue.issueType}</div>
-          <div className="flex justify-center mt-3"><AIChip>{issue.confidence}% confidence</AIChip></div>
-          <div className="mt-6 text-[14.5px]" style={{ color: T.inkSoft }}>Is this the problem you&apos;d like to report?</div>
-        </div>
-        <div className="w-full space-y-3">
-          <PrimaryButton onClick={() => setStep("severity")} icon={<Check size={17} />}>Yes, that&apos;s it</PrimaryButton>
-          <SecondaryButton onClick={() => setStep("camera")}>Try another photo</SecondaryButton>
-        </div>
+        <PrimaryButton disabled={manualText.trim().length < 5} onClick={() => handleManualDescribe(manualText.trim())} icon={<ChevronRight size={18} />}>{t("capture_continue")}</PrimaryButton>
       </div>
     );
   }
 
   if (step === "severity" && issue) {
-    const opts = [{ key: "High" as const, sub: "Could be dangerous", color: T.rust, e: "🔥" }, { key: "Medium" as const, sub: "Needs attention", color: T.amber, e: "⚡" }, { key: "Low" as const, sub: "Minor issue", color: T.blue, e: "🌱" }];
+    const opts = [
+      { key: "High" as const, label: t("severity_high"), sub: t("severity_high_desc"), color: T.rust, e: "🔥" },
+      { key: "Medium" as const, label: t("severity_medium"), sub: t("severity_medium_desc"), color: T.amber, e: "⚡" },
+      { key: "Low" as const, label: t("severity_low"), sub: t("severity_low_desc"), color: T.green, e: "🌱" },
+    ];
     return (
       <div className="flex flex-col min-h-full px-6 pt-8 pb-8 justify-between">
         <div>
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 24, color: T.ink }}>How serious does this look?</div>
-          <div className="mt-3 rounded-[24px] p-3.5 flex gap-2.5" style={{ background: `${T.purple}12`, border: `2px solid ${T.purple}33` }}>
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 22, color: T.ink }}>{t("severity_title")}</div>
+          <div className="mt-3 rounded-[20px] p-3.5 flex gap-2.5" style={{ background: `${T.purple}12` }}>
             <Sparkles size={16} color={T.purple} className="shrink-0 mt-0.5" />
-            <div style={{ fontSize: 13 }}><span style={{ color: T.purple, fontWeight: 800 }}>I&apos;d recommend {issue.severity}. </span><span style={{ color: T.inkSoft }}>{issue.explanation}</span></div>
+            <div style={{ fontSize: 13, color: T.inkSoft }}>{issue.explanation}</div>
           </div>
           <div className="mt-6 space-y-3">
             {opts.map((o) => { const active = severityChosen === o.key; return (
-              <button key={o.key} onClick={() => setSeverityChosen(o.key)} className="w-full flex items-center gap-3 rounded-[24px] px-4 py-4 text-left transition active:scale-[0.97]" style={{ background: active ? o.color + "1F" : T.card, border: `2.5px solid ${active ? o.color : T.line}`, boxShadow: active ? `3px 3px 0px ${o.color}55` : "none" }}>
+              <button key={o.key} onClick={() => setSeverityChosen(o.key)} className="w-full flex items-center gap-3 rounded-[20px] px-4 py-4 text-left transition active:scale-[0.97]" style={{ background: active ? o.color + "1F" : T.card, boxShadow: active ? `0 6px 16px -6px ${o.color}70` : "0 4px 14px -8px rgba(139,127,209,0.25)" }}>
                 <div className="w-10 h-10 rounded-full flex items-center justify-center text-lg" style={{ background: o.color + "22" }}>{o.e}</div>
-                <div className="flex-1"><div style={{ fontWeight: 800, fontSize: 15.5, color: active ? o.color : T.ink }}>{o.key}</div><div style={{ fontSize: 12.5, color: T.inkSoft }}>{o.sub}</div></div>
-                {o.key === issue.severity && <Pill tone="purple">AI pick</Pill>}
+                <div className="flex-1"><div style={{ fontWeight: 800, fontSize: 15.5, color: active ? o.color : T.ink }}>{o.label}</div><div style={{ fontSize: 12.5, color: T.inkSoft }}>{o.sub}</div></div>
+                {o.key === issue.severity && <Pill tone="purple">{t("severity_ai_pick")}</Pill>}
               </button>
             ); })}
           </div>
         </div>
-        <PrimaryButton onClick={() => setStep("voice")} icon={<ChevronRight size={18} />}>Continue</PrimaryButton>
+        <PrimaryButton onClick={proceedToLocation} icon={<ChevronRight size={18} />}>{t("severity_continue")}</PrimaryButton>
       </div>
     );
   }
 
-  if (step === "voice") {
+  if (step === "locating") {
     return (
-      <div className="flex flex-col min-h-full px-6 pt-10 pb-8 justify-between items-center">
-        <div className="w-full text-center">
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 21, color: T.ink }}>Want to tell us anything else?</div>
-          <div className="mt-1.5 text-[13.5px]" style={{ color: T.inkSoft }}>Optional — speak naturally, in your language.</div>
-        </div>
-        <div className="flex flex-col items-center gap-5">
-          <button onClick={recording ? stopRecording : startRecording} className="w-24 h-24 rounded-full flex items-center justify-center relative active:scale-95 transition" style={{ background: recording ? T.rust : T.green }}>
-            {recording && <span className="absolute inset-0 rounded-full animate-ping" style={{ background: T.rust, opacity: 0.3 }} />}<Mic size={30} color="#fff" />
-          </button>
-          <div style={{ fontSize: 13, color: T.inkSoft }}>{recording ? "Listening... tap to stop" : voiceTranscript ? "Got it" : "Tap to speak"}</div>
-        </div>
-        {voiceTranscript ? (
-          <div className="w-full">
-            <div className="rounded-[24px] p-4 mb-4" style={{ background: T.greenTint }}>
-              <div className="flex items-center gap-1.5 mb-1.5" style={{ color: T.greenDeep, fontSize: 11.5, fontWeight: 700 }}><Volume2 size={13} /> WE HEARD</div>
-              <div style={{ fontSize: 14, color: T.ink, fontStyle: "italic" }}>&quot;{voiceTranscript}&quot;</div>
-            </div>
-            <PrimaryButton onClick={findLocation} icon={<Check size={17} />}>Confirm</PrimaryButton>
-          </div>
-        ) : (
-          <SecondaryButton onClick={findLocation}>Skip this step</SecondaryButton>
-        )}
-      </div>
-    );
-  }
-
-  if (step === "location") {
-    return (
-      <div className="flex flex-col min-h-full px-6 pt-8 pb-8 justify-between">
-        <div>
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 21, color: T.ink }}>
-            {locationStatus === "locating" ? "Finding your location…" : locationStatus === "denied" ? "Using a default location" : "I found the location 📍"}
-          </div>
-          <div className="mt-5 rounded-[32px] overflow-hidden" style={{ height: 210 }}>
-            <MapView height={210} center={location ? { lat: location.lat, lng: location.lng } : DEFAULT_LOC} zoom={16} markers={location ? [{ lat: location.lat, lng: location.lng, color: T.green, big: true }] : []} />
-          </div>
-          <div className="mt-4 rounded-[24px] p-4" style={{ background: T.card, border: `1px solid ${T.line}` }}>
-            <div style={{ fontWeight: 700, fontSize: 15, color: T.ink }}>{location?.area || "…"}</div>
-            <div style={{ fontSize: 13, color: T.inkSoft }}>{location?.cityLine}</div>
-          </div>
-          {locationStatus === "denied" && <div className="mt-2 text-[12px] flex items-center gap-1.5" style={{ color: T.rust }}><AlertTriangle size={13} /> Location permission wasn&apos;t granted — using a default area.</div>}
-        </div>
-        <PrimaryButton onClick={checkDuplicates} icon={<Check size={17} />} disabled={locationStatus === "locating"}>{locationStatus === "locating" ? "Locating…" : "Yes, continue"}</PrimaryButton>
+      <div className="flex flex-col min-h-full px-6 pt-16 items-center justify-center">
+        <Loader2 className="animate-spin" size={26} color={T.purple} />
+        <div className="mt-3 text-[13.5px]" style={{ color: T.inkSoft }}>{t("location_finding")}</div>
       </div>
     );
   }
 
   if (step === "duplicate") {
-    if (!duplicates.length) {
-      return (
-        <div className="flex flex-col min-h-full px-6 pt-16 items-center justify-center">
-          <Loader2 className="animate-spin" size={22} color={T.green} />
-          <div className="mt-3 text-[13.5px]" style={{ color: T.inkSoft }}>Checking nearby reports…</div>
-        </div>
-      );
-    }
-    const top = duplicates[0].report;
+    const top = duplicates[0]?.report;
+    if (!top) return null;
     return (
       <div className="flex flex-col min-h-full px-6 pt-8 pb-8 justify-between">
         <div>
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 20, color: T.ink }}>🔎 We found a similar report nearby</div>
-          <div className="mt-1.5 text-[13.5px]" style={{ color: T.inkSoft }}>About {Math.round(duplicates[0].distance)}m away, same category.</div>
-          <div className="mt-5 rounded-[24px] p-4" style={{ background: T.card, border: `1px solid ${T.line}` }}>
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 19, color: T.ink }}>🔎 {t("duplicate_title")}</div>
+          <div className="mt-1.5 text-[13.5px]" style={{ color: T.inkSoft }}>{Math.round(duplicates[0].distance)}m away, same category.</div>
+          <div className="mt-5 rounded-[20px] p-4" style={{ background: T.card, boxShadow: "0 6px 18px -10px rgba(139,127,209,0.35)" }}>
             <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-[18px] flex items-center justify-center text-xl" style={{ background: chipBg(top.issue_type) }}>{ISSUE_EMOJI[top.issue_type]}</div>
-              <div className="flex-1"><div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{top.issue_type}</div><div style={{ fontSize: 12, color: T.inkSoft }}>{top.landmark}</div></div>
+              <div className="w-11 h-11 rounded-[16px] flex items-center justify-center text-xl" style={{ background: chipBg(top.issue_type) }}>{ISSUE_EMOJI[top.issue_type]}</div>
+              <div className="flex-1"><div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>{tIssue(top.issue_type)}</div><div style={{ fontSize: 12, color: T.inkSoft }}>{top.landmark}</div></div>
             </div>
-            <div className="flex items-center gap-1.5 mt-3" style={{ color: T.green, fontSize: 12.5, fontWeight: 600 }}><Users size={14} /> {top.affected_count} citizen{top.affected_count === 1 ? "" : "s"} affected</div>
+            <div className="flex items-center gap-1.5 mt-3" style={{ color: T.purpleDeep, fontSize: 12.5, fontWeight: 700 }}><Users size={14} /> {top.affected_count} {t("duplicate_citizens")}</div>
           </div>
         </div>
         <div className="space-y-3">
-          <PrimaryButton onClick={() => joinDuplicate(top.id)} icon={<Users size={17} />}>Join existing report</PrimaryButton>
-          <SecondaryButton onClick={goToReview}>Report separately</SecondaryButton>
+          <PrimaryButton onClick={() => joinDuplicate(top.id)} icon={<Users size={17} />}>{t("duplicate_join")}</PrimaryButton>
+          <SecondaryButton onClick={() => location && goToReview(location)}>{t("duplicate_separate")}</SecondaryButton>
         </div>
       </div>
     );
@@ -480,36 +542,73 @@ export default function ReportFlow() {
   if (step === "review" && issue && location) {
     const authority = resolveAuthority(issue.issueType);
     return (
-      <div className="flex flex-col min-h-full px-6 pt-8 pb-8 justify-between">
-        <div>
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 21, color: T.ink }}>Here&apos;s what I&apos;ll report</div>
-          {photoDataUrl && <img src={photoDataUrl} className="w-full rounded-[24px] object-cover mt-4" style={{ height: 150 }} alt="" />}
-          <div className="mt-4 rounded-[24px] overflow-hidden" style={{ background: T.card, border: `1px solid ${T.line}` }}>
-            {[["Issue", `${emoji} ${issue.issueType}`], ["Location", `${location.area}, ${location.cityLine}`], ["Severity", severityChosen], ["Authority", authority.authority]].map(([k, v], i, arr) => (
-              <div key={k} className="flex items-center justify-between px-4 py-3" style={{ borderBottom: i < arr.length - 1 ? `1px solid ${T.line}` : "none" }}>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: T.inkSoft, textTransform: "uppercase" }}>{k}</span>
-                <span style={{ fontSize: 13.5, color: T.ink, fontWeight: 600, textAlign: "right", maxWidth: 190 }}>{v}</span>
+      <div className="flex flex-col min-h-full pb-8">
+        <TopBar onBack={() => router.push("/home")} title="" />
+        <div className="px-6 -mt-2"><div style={{ fontFamily: "var(--font-baloo)", fontWeight: 800, fontSize: 20, color: T.ink, textAlign: "center" }}>{t("review_title")}</div></div>
+        <Stepper active={2} />
+
+        <div className="px-6">
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 17, color: T.ink }}>{t("review_here_is_what")}</div>
+          <div style={{ fontSize: 12.5, color: T.inkSoft, marginBottom: 12 }}>{t("review_subtitle")}</div>
+
+          <div className="flex gap-2 flex-wrap mb-4">
+            {photos.map((p, i) => (
+              <div key={i} className="relative w-14 h-14">
+                <img src={p.dataUrl} className="w-14 h-14 rounded-[14px] object-cover" alt="" />
+                <button onClick={() => removePhoto(i)} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: T.ink }}><X size={11} color="#fff" /></button>
+              </div>
+            ))}
+            {photos.length < MAX_PHOTOS && (
+              <button onClick={() => fileRef.current?.click()} className="w-14 h-14 rounded-[14px] flex items-center justify-center" style={{ background: T.purpleTint, border: `2px dashed ${T.purple}66` }}><Plus size={18} color={T.purpleDeep} /></button>
+            )}
+          </div>
+
+          <div className="rounded-[20px] overflow-hidden" style={{ background: T.card, boxShadow: "0 6px 18px -10px rgba(139,127,209,0.35)" }}>
+            {[
+              [t("review_issue"), `${emoji} ${tIssue(issue.issueType)}`],
+              [t("review_location"), `${location.area}, ${location.cityLine}`],
+              [t("review_severity"), opts_label(severityChosen, t)],
+              [t("review_authority"), authority.authority],
+            ].map(([k, v], i, arr) => (
+              <div key={k as string} className="flex items-center justify-between px-4 py-3" style={{ borderBottom: i < arr.length - 1 ? `1px solid ${T.line}` : "none" }}>
+                <span style={{ fontSize: 12.5, color: T.inkSoft, fontWeight: 700 }}>{k}</span>
+                <span style={{ fontSize: 13, color: T.ink, fontWeight: 700, textAlign: "right", maxWidth: 200 }}>{v}</span>
               </div>
             ))}
           </div>
+
           <div className="mt-5">
             <div className="flex items-center justify-between mb-2">
-              <span style={{ fontSize: 12, fontWeight: 700, color: T.inkSoft, textTransform: "uppercase" }}>Your report</span>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: T.ink }}>{t("review_description")}</span>
+              <button onClick={() => setEditingDescription((e) => !e)} className="flex items-center gap-1" style={{ color: T.purpleDeep, fontSize: 12, fontWeight: 700 }}><Edit3 size={12} /> {t("review_edit")}</button>
             </div>
-            <textarea value={finalDescription} onChange={(e) => setFinalDescription(e.target.value)} rows={5} className="w-full rounded-[24px] p-4 text-[14px] outline-none" style={{ background: T.greenTint, border: `1.5px solid ${T.green}55`, color: T.ink }} />
+            {editingDescription ? (
+              <textarea value={finalDescription} onChange={(e) => setFinalDescription(e.target.value)} rows={5} className="w-full rounded-[18px] p-4 text-[13.5px] outline-none" style={{ background: T.greenTint, border: `1.5px solid ${T.green}55`, color: T.ink }} />
+            ) : (
+              <div className="rounded-[18px] p-4" style={{ background: T.greenTint, fontSize: 13.5, color: T.ink, lineHeight: 1.55 }}>{finalDescription || "…"}</div>
+            )}
           </div>
+
           {error && <div className="mt-3 text-[12.5px]" style={{ color: T.rust }}>{error}</div>}
+
+          <div className="mt-6">
+            <PrimaryButton onClick={submitReport} icon={<Send size={17} />} disabled={!finalDescription} variant="yellow">{t("review_submit")}</PrimaryButton>
+          </div>
         </div>
-        <PrimaryButton onClick={submitReport} icon={<Send size={17} />} disabled={!finalDescription}>Looks good — submit</PrimaryButton>
       </div>
     );
   }
 
   if (step === "submitting") {
     return (
-      <div className="flex flex-col min-h-full px-6 pt-16 items-center">
-        <Loader2 className="animate-spin" size={30} color={T.green} />
-        <div className="mt-4" style={{ fontFamily: "var(--font-baloo)", fontWeight: 600, fontSize: 19, color: T.ink }}>Submitting your report…</div>
+      <div className="flex flex-col min-h-full pb-8">
+        <Stepper active={3} />
+        <div className="flex-1 flex flex-col items-center justify-center px-6">
+          <Loader2 className="animate-spin" size={30} color={T.purple} />
+          <div className="mt-4 text-center" style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 18, color: T.ink }}>
+            {uploadProgress ? `${t("submitting_uploading")} ${uploadProgress.current}/${uploadProgress.total}…` : t("submitting_sending")}
+          </div>
+        </div>
       </div>
     );
   }
@@ -518,17 +617,23 @@ export default function ReportFlow() {
     return (
       <div className="flex flex-col min-h-full px-6 pt-14 pb-8 items-center justify-between">
         <div className="w-full text-center">
-          <div className="text-5xl mb-4">✅</div>
-          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 24, color: T.ink }}>Report submitted!</div>
-          <div className="mt-2 text-[13.5px]" style={{ color: T.inkSoft }}>Your report has been created and is now trackable.</div>
+          <div className="text-5xl mb-4">🎉</div>
+          <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 800, fontSize: 22, color: T.ink }}>{t("submitted_title")}</div>
+          <div className="mt-2 text-[13.5px]" style={{ color: T.inkSoft }}>{t("submitted_subtitle")}</div>
         </div>
         <div className="w-full space-y-3">
-          <PrimaryButton onClick={() => router.push(`/reports/${submittedId}`)} icon={<ChevronRight size={18} />}>Track report</PrimaryButton>
-          <SecondaryButton onClick={() => router.push("/home")}>Report another issue</SecondaryButton>
+          <PrimaryButton onClick={() => router.push(`/reports/${submittedId}`)} icon={<ChevronRight size={18} />}>{t("submitted_track")}</PrimaryButton>
+          <SecondaryButton onClick={() => router.push("/home")}>{t("submitted_another")}</SecondaryButton>
         </div>
       </div>
     );
   }
 
   return null;
+}
+
+function opts_label(severity: string, t: (k: any) => string) {
+  if (severity === "High") return t("severity_high");
+  if (severity === "Medium") return t("severity_medium");
+  return t("severity_low");
 }

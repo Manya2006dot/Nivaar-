@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Mic, ChevronRight } from "lucide-react";
-import { T } from "@/components/tokens";
+import { T, tintShadow } from "@/components/tokens";
 import { PrimaryButton } from "@/components/ui/Buttons";
 import { LANGUAGES, Lang } from "@/lib/i18n/translations";
 import { useLanguage } from "@/lib/i18n/LanguageProvider";
@@ -29,15 +29,15 @@ export default function LanguageScreen() {
   return (
     <div className="flex flex-col min-h-full px-6 pt-14 pb-8 justify-between">
       <div>
-        <div className="text-[28px] mb-1" style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, color: T.ink }}>Welcome to Nivaar 👋</div>
+        <div className="text-[28px] mb-1" style={{ fontFamily: "var(--font-baloo)", fontWeight: 800, color: T.ink }}>Welcome to Nivaar 👋</div>
         <div className="text-[14.5px] mb-8" style={{ color: T.inkSoft }}>How would you like to use Nivaar?</div>
         <div className="grid grid-cols-2 gap-3">
           {LANGUAGES.map((l) => {
             const active = choice === l.code;
             return (
-              <button key={l.code} onClick={() => setChoice(l.code)} className="rounded-[24px] px-4 py-4 text-left transition active:scale-95" style={{ background: active ? T.greenTint : T.card, border: `2px solid ${active ? T.green : T.line}` }}>
-                <div style={{ fontFamily: "var(--font-baloo)", fontSize: 19, color: active ? T.greenDeep : T.ink, fontWeight: 600 }}>{l.native}</div>
-                <div style={{ fontSize: 11.5, color: T.inkSoft, fontWeight: 600 }}>{l.label}</div>
+              <button key={l.code} onClick={() => setChoice(l.code)} className="rounded-[24px] px-4 py-4 text-left transition active:scale-95" style={{ background: active ? T.purple : T.card, boxShadow: active ? tintShadow(T.purpleDeep) : "0 4px 14px -8px rgba(139,127,209,0.25)" }}>
+                <div style={{ fontFamily: "var(--font-baloo)", fontSize: 19, color: active ? "#fff" : T.ink, fontWeight: 700 }}>{l.native}</div>
+                <div style={{ fontSize: 11.5, color: active ? "rgba(255,255,255,0.8)" : T.inkSoft, fontWeight: 600 }}>{l.label}</div>
               </button>
             );
           })}

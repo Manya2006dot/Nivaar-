@@ -33,8 +33,16 @@ const LOW_CONFIDENCE_THRESHOLD = 65;
 const DEFAULT_LOC = { lat: 12.9945, lng: 77.691 };
 const MAX_PHOTOS = 5;
 
-async function reverseGeocode(lat: number, lng: number): Promise<{ area: string; cityLine: string }> {
-  const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=16`);
+async function reverseGeocode(lat: number, lng: number, uiLang: string): Promise<{ area: string; cityLine: string }> {
+  // Bug fix: Nominatim picks a response language using its own heuristics
+  // when no accept-language is given, which can return address components
+  // in whatever script it associates with the coordinates' region —
+  // completely independent of Nivaar's selected UI language. That's why
+  // English-selected users could see Kannada-script address text: this
+  // Nivaar-controlled display field wasn't actually asking Nominatim for
+  // any specific language. Passing accept-language ties it to the app's
+  // real selected language every time.
+  const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=16&accept-language=${uiLang}`);
   if (!res.ok) throw new Error("reverse geocode failed");
   const data = await res.json();
   const a = data.address || {};
@@ -46,7 +54,7 @@ async function reverseGeocode(lat: number, lng: number): Promise<{ area: string;
 
 export default function ReportFlow() {
   const router = useRouter();
-  const { t, tIssue } = useLanguage();
+  const { t, tIssue, lang } = useLanguage();
   const [step, setStep] = useState<Step>("capture");
 
   // --- capture: photos ---
@@ -195,7 +203,7 @@ export default function ReportFlow() {
       async (pos) => {
         const lat = pos.coords.latitude, lng = pos.coords.longitude;
         let place = { area: "Your location", cityLine: "" };
-        try { place = await reverseGeocode(lat, lng); } catch {}
+        try { place = await reverseGeocode(lat, lng, lang); } catch {}
         const loc = { lat, lng, ...place };
         setLocation(loc);
         checkDuplicates(loc);

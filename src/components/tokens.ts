@@ -1,25 +1,31 @@
-// Design tokens — playful civic-tech direction: one consistent soft/muted
-// purple as the brand color, warm yellow reserved for primary CTAs, pastel
-// accent colors, white/cream background, soft shadows, generous rounding.
+// Design tokens — playful civic-tech direction: one consistent purple as the
+// brand color, warm yellow reserved for primary CTAs, vibrant accent colors,
+// white/cream background, soft shadows, generous rounding.
 // Every screen imports from here so the palette can never drift between
 // screens — change a value here and the whole app follows.
+//
+// Brightened to match the Welcome screen's energy: same identity (purple /
+// yellow / green / coral / blue), meaningfully more saturated than the
+// original pastel pass, while keeping every *Tint background + *Deep text
+// pairing at a contrast ratio that stays comfortably readable (not neon,
+// not washed out).
 
 export const T = {
-  ink: "#2B2540", inkSoft: "#746E8C", bg: "#FFFBF3", card: "#FFFFFF", line: "#F0E9FB",
+  ink: "#211A38", inkSoft: "#5B547A", bg: "#FFF8EC", card: "#FFFFFF", line: "#F0E4FB",
 
-  // The ONE purple used everywhere — medium/muted, never neon.
-  purple: "#8B7FD1", purpleDeep: "#6C5FB8", purpleTint: "#EFEBFB",
+  // The ONE purple used everywhere — vibrant, matches the Welcome screen's CTA.
+  purple: "#6C3FC5", purpleDeep: "#4A2E8C", purpleTint: "#EAE1FB",
 
-  // Warm yellow — reserved for primary CTAs (submit button) + bottom nav.
-  yellow: "#FFC94A", yellowDeep: "#E8A619", yellowTint: "#FFF3D9",
+  // Warm golden yellow — reserved for primary CTAs (submit button) + bottom nav.
+  yellow: "#FFC01F", yellowDeep: "#C98A00", yellowTint: "#FFF1D2",
 
-  // Severity / status accents — pastel, not neon.
-  green: "#5CC98E", greenDeep: "#379A67", greenTint: "#E4F8ED",
-  amber: "#FFA552", amberDeep: "#D97C1F", amberTint: "#FFEEDD",
-  rust: "#FF8B7B", rustDeep: "#E85C48", rustTint: "#FFE7E2",
-  blue: "#7FB8E8", blueDeep: "#4A8FC7", blueTint: "#E7F2FC",
+  // Severity / status accents — vivid but not neon.
+  green: "#22B573", greenDeep: "#12804F", greenTint: "#DFF6EA",
+  amber: "#FF9500", amberDeep: "#C96F00", amberTint: "#FFEACC",
+  rust: "#FF5A3C", rustDeep: "#D93F24", rustTint: "#FFE0D9",
+  blue: "#2E9CE0", blueDeep: "#1B76B3", blueTint: "#DDF0FC",
 
-  sage: "#B4AECB",
+  sage: "#8E86AE",
 } as const;
 
 export const CATEGORY_COLORS: Record<string, string> = {

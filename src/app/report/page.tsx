@@ -16,6 +16,8 @@ import { createClient, ensureAuthenticated, uploadEvidence } from "@/lib/supabas
 import { useLanguage } from "@/lib/i18n/LanguageProvider";
 import { compressImage } from "@/lib/imageCompress";
 import { postJson, postForm, parseJsonResponse } from "@/lib/safeFetch";
+import { useRequireOnboarding } from "@/lib/useRequireOnboarding";
+import { reverseGeocode } from "@/lib/geocode";
 
 type Step =
   | "capture" | "ai-detecting" | "ai-failed" | "manual-describe"
@@ -33,28 +35,12 @@ const LOW_CONFIDENCE_THRESHOLD = 65;
 const DEFAULT_LOC = { lat: 12.9945, lng: 77.691 };
 const MAX_PHOTOS = 5;
 
-async function reverseGeocode(lat: number, lng: number, uiLang: string): Promise<{ area: string; cityLine: string }> {
-  // Bug fix: Nominatim picks a response language using its own heuristics
-  // when no accept-language is given, which can return address components
-  // in whatever script it associates with the coordinates' region —
-  // completely independent of Nivaar's selected UI language. That's why
-  // English-selected users could see Kannada-script address text: this
-  // Nivaar-controlled display field wasn't actually asking Nominatim for
-  // any specific language. Passing accept-language ties it to the app's
-  // real selected language every time.
-  const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=16&accept-language=${uiLang}`);
-  if (!res.ok) throw new Error("reverse geocode failed");
-  const data = await res.json();
-  const a = data.address || {};
-  const area = a.suburb || a.neighbourhood || a.village || a.town || a.city_district || "Your area";
-  const city = a.city || a.town || a.state_district || "";
-  const state = a.state || "";
-  return { area, cityLine: [city, state].filter(Boolean).join(", ") || data.display_name || "" };
-}
+
 
 export default function ReportFlow() {
   const router = useRouter();
   const { t, tIssue, lang } = useLanguage();
+  const onboardingReady = useRequireOnboarding();
   const [step, setStep] = useState<Step>("capture");
 
   // --- capture: photos ---
@@ -302,6 +288,7 @@ export default function ReportFlow() {
   const severityColor = (s: string) => (s === "High" ? T.rust : s === "Medium" ? T.amber : T.green);
 
   // ============================= RENDER =============================
+  if (!onboardingReady) return null;
 
   if (step === "capture") {
     return (

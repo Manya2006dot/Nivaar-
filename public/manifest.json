@@ -1,0 +1,10 @@
+{
+  "name": "Nivaar",
+  "short_name": "Nivaar",
+  "description": "AI-powered civic issue reporting — take a photo, we handle the rest.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FFF8EC",
+  "theme_color": "#6C3FC5"
+}

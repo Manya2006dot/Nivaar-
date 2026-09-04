@@ -11,6 +11,7 @@ import { ensureAuthenticated, uploadResolutionPhoto } from "@/lib/supabase/clien
 import { useLanguage } from "@/lib/i18n/LanguageProvider";
 import { compressImage } from "@/lib/imageCompress";
 import { getJson, postJson } from "@/lib/safeFetch";
+import { useLocalizedPlace } from "@/lib/useLocalizedPlace";
 
 const STAGES = ["Submitted", "Acknowledged", "Assigned", "In Progress", "Resolved"];
 const STAGE_COLOR: Record<string, string> = {
@@ -61,6 +62,8 @@ export default function ReportDetail({ params }: { params: { id: string } }) {
     }
   };
 
+  const place = useLocalizedPlace(report?.latitude, report?.longitude, report?.landmark, report?.address);
+
   if (!report) return <div className="flex items-center justify-center min-h-full"><Loader2 className="animate-spin" color={T.purple} /></div>;
 
   const stageIndex = STAGES.indexOf(report.status);
@@ -91,7 +94,7 @@ export default function ReportDetail({ params }: { params: { id: string } }) {
           {report.image_url ? <img src={report.image_url} className="w-12 h-12 rounded-[16px] object-cover" alt="" /> : <div className="w-12 h-12 rounded-[16px] flex items-center justify-center text-2xl" style={{ background: chipBg(report.issue_type) }}>{ISSUE_EMOJI[report.issue_type]}</div>}
           <div>
             <div style={{ fontFamily: "var(--font-baloo)", fontWeight: 700, fontSize: 15.5, color: T.ink }}>{tIssue(report.issue_type)}</div>
-            <div style={{ fontSize: 12, color: T.inkSoft }}>{report.landmark}</div>
+            <div style={{ fontSize: 12, color: T.inkSoft }}>{place.area}</div>
             <div className="flex gap-1.5 mt-1"><Pill tone={severityTone(report.severity)}>{report.severity}</Pill>{report.is_demo && <Pill tone="amber">Demo</Pill>}</div>
           </div>
         </div>
@@ -127,7 +130,7 @@ export default function ReportDetail({ params }: { params: { id: string } }) {
           <MapView height={150} center={{ lat: report.latitude, lng: report.longitude }} zoom={15} markers={[{ lat: report.latitude, lng: report.longitude, color: T.rust, big: true }]} />
         </div>
         <div className="rounded-[18px] p-4 flex items-center justify-between mb-5" style={{ background: T.card, boxShadow: "0 4px 14px -8px rgba(139,127,209,0.3)" }}>
-          <div style={{ fontWeight: 700, fontSize: 13.5, color: T.ink }}>{report.address}</div>
+          <div style={{ fontWeight: 700, fontSize: 13.5, color: T.ink }}>{place.full}</div>
           <a href={`https://www.openstreetmap.org/?mlat=${report.latitude}&mlon=${report.longitude}#map=17/${report.latitude}/${report.longitude}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: T.purpleDeep }}>{t("track_view_map")}</a>
         </div>
 

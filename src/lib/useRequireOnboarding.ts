@@ -13,7 +13,16 @@ export function useRequireOnboarding() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && !localStorage.getItem("nivaar_lang")) {
+    let onboarded = false;
+    try {
+      onboarded = typeof window !== "undefined" && !!localStorage.getItem("nivaar_lang");
+    } catch {
+      // Some private-browsing modes throw on localStorage access instead of
+      // just returning null. Treat that the same as "not onboarded" rather
+      // than letting an uncaught error leave this hook stuck.
+      onboarded = false;
+    }
+    if (!onboarded) {
       router.replace("/");
       return;
     }

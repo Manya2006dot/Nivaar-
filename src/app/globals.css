@@ -10,3 +10,34 @@ html, body {
 * { box-sizing: border-box; }
 
 .leaflet-container { font-family: var(--font-jakarta); }
+
+/* Dynamic-viewport-height frame with a vh fallback for browsers that don't
+   support dvh yet. Written as real CSS (not an inline style) specifically
+   because inline React style objects can't express a fallback cascade —
+   this rule relies on the browser simply ignoring the second declaration
+   if it doesn't understand `dvh`, keeping the first. Fixes iOS Safari's
+   classic 100vh-overshoots-the-visible-area problem, which was the root
+   cause of the empty space below the Welcome artwork. */
+.app-frame-height {
+  min-height: calc(100vh - 48px);
+  min-height: calc(100dvh - 48px);
+}
+
+/* --- Welcome screen artwork: subtle float + depth, no layout impact --- */
+@keyframes nivaar-welcome-float {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-4px) scale(1.01); }
+}
+.nivaar-welcome-float {
+  animation: nivaar-welcome-float 6.5s ease-in-out infinite;
+  transform-origin: center center;
+  will-change: transform;
+}
+.nivaar-welcome-vignette {
+  box-shadow:
+    inset 0 0 70px rgba(20, 10, 40, 0.09),
+    inset 0 -50px 60px -35px rgba(20, 10, 40, 0.12);
+}
+@media (prefers-reduced-motion: reduce) {
+  .nivaar-welcome-float { animation: none; }
+}
